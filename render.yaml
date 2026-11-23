@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: budgetplate
+    runtime: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 24
+      - key: DB_PATH
+        value: /data/budgetplate.db
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 1

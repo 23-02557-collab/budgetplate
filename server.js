@@ -1,0 +1,25 @@
+const express=require('express'),{DatabaseSync}=require('node:sqlite'),bcrypt=require('bcryptjs'),crypto=require('crypto'),path=require('path');
+const db=new DatabaseSync(process.env.DB_PATH||path.join(__dirname,'budgetplate.db'));
+db.exec(`CREATE TABLE IF NOT EXISTS users(email TEXT PRIMARY KEY,pw TEXT NOT NULL,data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,email TEXT NOT NULL,created INTEGER NOT NULL)`);
+const app=express();app.set('trust proxy',1);app.use(express.json({limit:'2mb'}));app.use(express.static(path.join(__dirname,'public')));
+const fail=(res,c,m)=>res.status(c).json({error:m}),tries=new Map();
+const limited=req=>{const k=req.ip,n=(tries.get(k)||0)+1;tries.set(k,n);setTimeout(()=>tries.delete(k),9e5).unref();return n>30};
+const start=email=>{const t=crypto.randomBytes(32).toString('hex');db.prepare('INSERT INTO sessions VALUES(?,?,?)').run(t,email,Date.now());return t};
+function needAuth(req,res,next){const t=(req.headers.authorization||'').replace('Bearer ','');const s=db.prepare('SELECT email FROM sessions WHERE token=? AND created>?').get(t,Date.now()-30*864e5);if(!s)return fail(res,401,'Please log in again.');req.email=s.email;req.token=t;next()}
+const load=e=>{const r=db.prepare('SELECT data FROM users WHERE email=?').get(e);return r&&JSON.parse(r.data)};
+app.post('/api/register',(req,res)=>{if(limited(req))return fail(res,429,'Too many attempts. Try again later.');const{email,pw,data}=req.body||{};
+if(!/^\S+@\S+\.\S+$/.test(email||''))return fail(res,400,'Enter a valid email.');if(!pw||pw.length<6)return fail(res,400,'Password must be at least 6 characters.');
+if(!data||!['Student','Parent'].includes(data.type))return fail(res,400,'Choose Student or Parent.');
+if(db.prepare('SELECT 1 FROM users WHERE email=?').get(email))return fail(res,409,'That email already has an account. Log in instead.');
+db.prepare('INSERT INTO users VALUES(?,?,?)').run(email,bcrypt.hashSync(pw,10),JSON.stringify(data));res.json({token:start(email),email,data})});
+app.post('/api/login',(req,res)=>{if(limited(req))return fail(res,429,'Too many attempts. Try again later.');const{email,pw}=req.body||{};
+const u=db.prepare('SELECT * FROM users WHERE email=?').get(email||'');if(!u||!bcrypt.compareSync(pw||'',u.pw))return fail(res,401,'Email or password is incorrect.');res.json({token:start(email),email,data:JSON.parse(u.data)})});
+app.post('/api/logout',needAuth,(req,res)=>{db.prepare('DELETE FROM sessions WHERE token=?').run(req.token);res.json({ok:1})});
+app.get('/api/me',needAuth,(req,res)=>res.json({email:req.email,data:load(req.email)}));
+app.put('/api/state',needAuth,(req,res)=>{const d=req.body;if(!d||typeof d!=='object'||!['Student','Parent'].includes(d.type))return fail(res,400,'Bad data.');db.prepare('UPDATE users SET data=? WHERE email=?').run(JSON.stringify(d),req.email);res.json({ok:1})});
+app.get('/api/family/:email',needAuth,(req,res)=>{const me=load(req.email),s=load(req.params.email.toLowerCase());
+if(!me||me.type!=='Parent')return fail(res,403,'Only parent accounts can view a shared budget.');
+if(!s||s.type!=='Student'||!s.share)return fail(res,404,'No shared budget found. Ask the student to turn on sharing.');
+res.json({data:{name:s.name,type:'Student',share:1,allow:s.allow,period:s.period,pct:s.pct,start:s.start,plan:{},bills:[],subs:[],ex:s.ex.map(e=>({...e,desc:''}))}})});
+app.listen(process.env.PORT||3000,()=>console.log('BudgetPlate running on port '+(process.env.PORT||3000)));
